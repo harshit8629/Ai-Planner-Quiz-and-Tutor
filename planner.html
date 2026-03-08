@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Study Planner – StudyAI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <!-- Confetti for success animation -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+
+    <style>
+        .subject-card {
+            cursor: grab;
+            transition: all 0.3s ease;
+        }
+        .subject-card:active {
+            cursor: grabbing;
+        }
+        .subject-card.dragging {
+            opacity: 0.65;
+            transform: scale(0.98);
+            box-shadow: 0 12px 32px rgba(0,0,0,0.15);
+        }
+        .progress-circle {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: conic-gradient(var(--primary) 0% var(--progress, 0%), #dee2e6 var(--progress, 0%) 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: var(--primary);
+            position: relative;
+        }
+        .progress-circle::after {
+            content: '';
+            width: 88px;
+            height: 88px;
+            background: var(--card-bg);
+            border-radius: 50%;
+            position: absolute;
+        }
+        .day-cell {
+            min-height: 70px;
+            border: 1px solid rgba(0,0,0,0.1);
+            border-radius: 10px;
+            padding: 8px;
+            font-size: 0.9rem;
+            text-align: center;
+            transition: background 0.3s;
+        }
+        .day-cell.high-load   { background: rgba(220, 53, 69, 0.12); }
+        .day-cell.medium-load { background: rgba(255, 193, 7, 0.12); }
+        .mini-calendar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+            gap: 10px;
+            margin: 1.5rem 0;
+        }
+        .expandable-day .card-header {
+            cursor: pointer;
+        }
+        /* Force readable text in plan output in both modes */
+        #plan-output,
+        #plan-output * {
+            color: var(--bs-body-color) !important;
+        }
+        #plan-output .card-header {
+            background: linear-gradient(90deg, #6366f1, #a78bfa) !important;
+            color: white !important;
+        }
+        #plan-output .card-body {
+            background: var(--bs-body-bg) !important;
+        }
+        body.dark #plan-output .card-body {
+            background: #1e293b !important;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg fixed-top">
+        <div class="container">
+            <a class="navbar-brand fw-bold" href="/">StudyAI</a>
+            <div class="d-flex align-items-center">
+                <a href="/" class="me-4">Home</a>
+                <i class="theme-toggle bi bi-moon-stars-fill fs-4" id="themeToggle"></i>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container py-5 mt-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <div class="card-glass p-4 p-md-5">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h2 class="fw-bold m-0">AI-Powered Study Planner</h2>
+                        <small class="text-muted">Drag subjects to set priority order</small>
+                    </div>
+
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label class="form-label fw-medium">Exam Date</label>
+                            <input type="date" id="exam_date" class="form-control form-control-lg" required onchange="updateEstimation()">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-medium">Daily Study Hours</label>
+                            <input type="number" id="daily_hours" class="form-control form-control-lg" value="4" min="1" max="12" step="0.5" oninput="updateEstimation()">
+                        </div>
+                    </div>
+
+                    <!-- Live estimation -->
+                    <div class="alert alert-info d-flex justify-content-between align-items-center mb-4" id="estimation-panel" style="display:none;">
+                        <div>
+                            <strong>Estimated total hours:</strong> <span id="est-hours">0</span> h<br>
+                            <small>Available: <span id="days-left">0</span> days × <span id="daily-val">0</span> h = <span id="total-avail">0</span> h</small>
+                        </div>
+                        <div class="progress-circle" id="prog-circle">
+                            <span id="prog-text">0%</span>
+                        </div>
+                    </div>
+
+                    <h5 class="mb-3 d-flex justify-content-between align-items-center">
+                        Subjects (drag to reorder priority)
+                        <button class="btn btn-sm btn-primary" onclick="addSubject()">
+                            <i class="bi bi-plus-lg"></i> Add Subject
+                        </button>
+                    </h5>
+
+                    <div id="subjects-list" class="mb-5"></div>
+
+                    <button id="generate-plan-btn" class="btn btn-primary btn-lg w-100 py-3 fw-bold" onclick="generateAIPlan()">
+                        <i class="bi bi-stars me-2"></i> Generate Time Table
+                    </button>
+                </div>
+
+                <!-- Generated plan will appear here -->
+                <div id="plan-output" class="mt-5"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Theme persistence
+        const toggle = document.getElementById('themeToggle');
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        if (savedTheme === 'dark') {
+            document.body.classList.add('dark');
+            document.documentElement.setAttribute('data-bs-theme', 'dark');
+            toggle.classList.replace('bi-moon-stars-fill', 'bi-sun-fill');
+        }
+        toggle.onclick = () => {
+            document.body.classList.toggle('dark');
+            const isDark = document.body.classList.contains('dark');
+            document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
+            toggle.classList.toggle('bi-moon-stars-fill', !isDark);
+            toggle.classList.toggle('bi-sun-fill', isDark);
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+        };
+
+        // Tooltips
+        const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+        [...tooltipTriggerList].forEach(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+        let subjectCounter = 0;
+
+        function addSubject(defaultData = {name: '', difficulty: '4', topics: ''}) {
+            subjectCounter++;
+            const container = document.getElementById('subjects-list');
+            const card = document.createElement('div');
+            card.className = 'subject-card card-glass mb-3 p-3';
+            card.draggable = true;
+            card.id = `subject-${subjectCounter}-${Date.now()}`;
+            card.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="m-0"><i class="bi bi-grip-vertical text-muted me-2"></i> Subject</h6>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary me-1" onclick="duplicateSubject('${card.id}')">
+                            <i class="bi bi-copy"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="card.remove(); updateEstimation()">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <input type="text" class="form-control subject-name" placeholder="Subject name" value="${defaultData.name}" oninput="updateEstimation()">
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select subject-diff" onchange="updateEstimation()">
+                            <option value="5" ${defaultData.difficulty === '5' ? 'selected' : ''}>Very Hard (5)</option>
+                            <option value="4" ${defaultData.difficulty === '4' ? 'selected' : ''}>Hard (4)</option>
+                            <option value="3" ${defaultData.difficulty === '3' ? 'selected' : ''}>Medium (3)</option>
+                            <option value="2" ${defaultData.difficulty === '2' ? 'selected' : ''}>Easy (2)</option>
+                            <option value="1" ${defaultData.difficulty === '1' ? 'selected' : ''}>Very Easy (1)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <input type="text" class="form-control subject-topics" placeholder="Topics (comma separated)" value="${defaultData.topics}" oninput="updateEstimation()">
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+
+            // Drag & drop
+            card.addEventListener('dragstart', e => {
+                e.dataTransfer.setData('text/plain', card.id);
+                card.classList.add('dragging');
+            });
+            card.addEventListener('dragend', () => card.classList.remove('dragging'));
+            card.addEventListener('dragover', e => e.preventDefault());
+            card.addEventListener('drop', e => {
+                e.preventDefault();
+                const draggedId = e.dataTransfer.getData('text/plain');
+                const draggedEl = document.getElementById(draggedId);
+                if (draggedEl && draggedEl !== card) {
+                    const rect = card.getBoundingClientRect();
+                    const insertBefore = (e.clientY < rect.top + rect.height / 2) ? card : card.nextSibling;
+                    container.insertBefore(draggedEl, insertBefore);
+                }
+            });
+
+            updateEstimation();
+        }
+
+        function duplicateSubject(sourceId) {
+            const source = document.getElementById(sourceId);
+            if (!source) return;
+            addSubject({
+                name: source.querySelector('.subject-name').value + ' (copy)',
+                difficulty: source.querySelector('.subject-diff').value,
+                topics: source.querySelector('.subject-topics').value
+            });
+        }
+
+        // Live total hours estimation
+        function updateEstimation() {
+            let totalHours = 0;
+            document.querySelectorAll('.subject-card').forEach(card => {
+                const diff = parseInt(card.querySelector('.subject-diff').value) || 0;
+                const topicsCount = card.querySelector('.subject-topics').value
+                    .split(',')
+                    .filter(t => t.trim()).length || 1;
+                totalHours += diff * topicsCount;
+            });
+
+            const daily = parseFloat(document.getElementById('daily_hours').value) || 0;
+            let daysLeft = 0;
+            const examDateStr = document.getElementById('exam_date').value;
+            if (examDateStr) {
+                const today = new Date();
+                const exam = new Date(examDateStr);
+                daysLeft = Math.max(0, Math.ceil((exam - today) / (1000 * 60 * 60 * 24)));
+            }
+            const availableHours = daysLeft * daily;
+
+            document.getElementById('est-hours').textContent = totalHours.toFixed(1);
+            document.getElementById('days-left').textContent = daysLeft;
+            document.getElementById('daily-val').textContent = daily.toFixed(1);
+            document.getElementById('total-avail').textContent = availableHours.toFixed(1);
+
+            const percent = availableHours > 0 ? Math.min(100, Math.round((totalHours / availableHours) * 100)) : 0;
+            document.getElementById('prog-text').textContent = percent + '%';
+            document.getElementById('prog-circle').style.setProperty('--progress', percent + '%');
+
+            document.getElementById('estimation-panel').style.display = (totalHours > 0 || daysLeft > 0) ? 'flex' : 'none';
+        }
+
+        // Add one empty subject on load
+        addSubject();
+
+        async function generateAIPlan() {
+            const subjects = [];
+            document.querySelectorAll('.subject-card').forEach(card => {
+                const name = card.querySelector('.subject-name').value.trim();
+                const difficulty = card.querySelector('.subject-diff').value;
+                const topics = card.querySelector('.subject-topics').value.trim();
+                if (name && topics) {
+                    subjects.push({ name, difficulty, topics });
+                }
+            });
+
+            if (subjects.length === 0) {
+                alert("Please add at least one subject with topics.");
+                return;
+            }
+
+            const payload = {
+                subjects,
+                exam_date: document.getElementById('exam_date').value,
+                daily_hours: document.getElementById('daily_hours').value
+            };
+
+            const btn = document.getElementById('generate-plan-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Generating AI plan...';
+
+            try {
+                const response = await fetch("/generate_plan", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error("Server responded with error");
+
+                const plan = await response.json();
+
+                let html = `
+                    <div class="card-glass p-4 p-md-5 mt-5 shadow-lg">
+                        <h3 class="text-center mb-4 fw-bold">Your Personalized AI Study Plan</h3>
+                `;
+
+                if (plan.error) {
+                    html += `<div class="alert alert-danger p-4">${plan.error}</div>`;
+                } else {
+                    // Mini calendar preview
+                    html += `<div class="mini-calendar mb-5">`;
+                    plan.schedule.forEach(day => {
+                        const load = day.hours_used;
+                        const loadClass = load > 7 ? 'high-load' : (load > 4 ? 'medium-load' : '');
+                        html += `
+                            <div class="day-cell ${loadClass} border">
+                                <div class="small fw-bold">${day.day.split('(')[0].trim()}</div>
+                                <div class="fs-5 fw-bold">${load} h</div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+
+                    // Detailed schedule
+                    plan.schedule.forEach(day => {
+                        html += `
+                            <div class="card mb-4 border-0 shadow-sm">
+                                <div class="card-header d-flex justify-content-between align-items-center fw-bold text-white" 
+                                     style="background: linear-gradient(90deg, #6366f1, #a78bfa);">
+                                    <span>${day.day} • ${day.hours_used} hours</span>
+                                    <span class="badge bg-light text-dark">${day.tasks.length} topics</span>
+                                </div>
+                                <div class="card-body">
+                                    ${day.tasks.map(task => `
+                                        <div class="d-flex justify-content-between py-3 border-bottom align-items-center">
+                                            <div>
+                                                <strong class="text-primary">${task.subject}</strong>
+                                                <span class="text-muted ms-2">→ ${task.topic}</span>
+                                            </div>
+                                            <span class="badge bg-primary rounded-pill px-3 py-2">
+                                                ${task.hours} hrs
+                                            </span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    if (plan.warning) {
+                        html += `<div class="alert alert-warning mt-4 p-4 shadow-sm">${plan.warning}</div>`;
+                    }
+
+                    // Celebration
+                    confetti({
+                        particleCount: 100,
+                        spread: 70,
+                        origin: { y: 0.6 }
+                    });
+                }
+
+                html += `</div>`;
+                document.getElementById('plan-output').innerHTML = html;
+            } catch (err) {
+                document.getElementById('plan-output').innerHTML = `
+                    <div class="alert alert-danger mt-5 p-4">
+                        Error generating plan: ${err.message}
+                    </div>
+                `;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-stars me-2"></i> Generate AI-Optimized Schedule';
+            }
+        }
+    </script>
+</body>
+</html>
